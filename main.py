@@ -1,14 +1,11 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import anthropic
 import os
-import json
-from datetime import datetime
+import httpx
 
 app = FastAPI(title="Payroll Guardian API")
 
-# CORS — permite que el HTML de Netlify hable con este servidor
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,55 +13,63 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Cliente Anthropic — la key viene de una variable de entorno (segura, no visible)
-client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_HEADERS = {
+    "x-api-key": ANTHROPIC_API_KEY,
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+}
 
 @app.get("/")
 def health():
-    return {"status": "ok", "service": "Payroll Guardian API", "version": "1.0"}
+    return {"status": "ok", "service": "Payroll Guardian API", "version": "1.1"}
 
 @app.post("/chat")
 async def chat(request: Request):
-    """Recibe el contexto del recibo + pregunta del usuario y devuelve respuesta de Claude."""
     try:
         body = await request.json()
-        system_prompt = body.get("system", "")
-        messages      = body.get("messages", [])
-        max_tokens    = body.get("max_tokens", 800)
-
-        response = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=max_tokens,
-            system=system_prompt,
-            messages=messages,
-        )
-
-        return {
-            "content": [{"text": response.content[0].text}],
-            "usage": {
-                "input_tokens":  response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
-            }
+        payload = {
+            "model": "claude-sonnet-4-5",
+            "max_tokens": body.get("max_tokens", 800),
+            "messages": body.get("messages", []),
         }
+        if body.get("system"):
+            payload["system"] = body["system"]
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                ANTHROPIC_URL,
+                headers={**ANTHROPIC_HEADERS, "x-api-key": ANTHROPIC_API_KEY},
+                json=payload,
+            )
+        data = resp.json()
+        if resp.status_code != 200:
+            return JSONResponse(status_code=resp.status_code, content={"error": data})
+        return data
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.post("/analyze")
 async def analyze(request: Request):
-    """Recibe datos del recibo y genera el resumen IA."""
     try:
-        body   = await request.json()
-        prompt = body.get("prompt", "")
-
-        response = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=500,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        return {"text": response.content[0].text}
+        body = await request.json()
+        payload = {
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 500,
+            "messages": [{"role": "user", "content": body.get("prompt", "")}],
+        }
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                ANTHROPIC_URL,
+                headers={**ANTHROPIC_HEADERS, "x-api-key": ANTHROPIC_API_KEY},
+                json=payload,
+            )
+        data = resp.json()
+        if resp.status_code != 200:
+            return JSONResponse(status_code=resp.status_code, content={"error": data})
+        return {"text": data.get("content", [{}])[0].get("text", "")}
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
-
